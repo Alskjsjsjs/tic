@@ -5,35 +5,332 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Tic-Tac-Toe Multiplayer</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" rel="stylesheet">
     <script type="module">
+        // Import Firebase libraries for a self-contained web app
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, addDoc, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-        
-        setLogLevel('debug');
 
-        const appId = typeof window.__app_id !== 'undefined' ? window.__app_id : 'default-app-id';
-        const firebaseConfig = typeof window.__firebase_config !== 'undefined' ? JSON.parse(window.__firebase_config) : {};
-        const initialAuthToken = typeof window.__initial_auth_token !== 'undefined' ? window.__initial_auth_token : null;
-        
-        let db, auth;
-        let userId;
+        // Set Firebase logging level to debug for better console output.
+        setLogLevel('Debug');
 
+        // Global variables for Firebase initialization, provided by the canvas environment.
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Initialize Firebase and get service instances
         const app = initializeApp(firebaseConfig);
-        db = getFirestore(app);
-        auth = getAuth(app);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
 
-        if (initialAuthToken) {
-             signInWithCustomToken(auth, initialAuthToken).catch((error) => {
-                 console.error("Error signing in with custom token:", error);
-             });
-        } else {
-             signInAnonymously(auth).catch((error) => {
-                 console.error("Error signing in anonymously:", error);
-             });
+        // UI elements
+        const messageEl = document.getElementById('message');
+        const boardEl = document.getElementById('board');
+        const newGameBtn = document.getElementById('newGameBtn');
+        const joinGameBtn = document.getElementById('joinGameBtn');
+        const gameIdInput = document.getElementById('gameIdInput');
+        const statusEl = document.getElementById('status');
+        const yourIdEl = document.getElementById('yourId');
+
+        // Game state variables
+        let currentUser;
+        let gameRef;
+        let unsubscribe;
+
+        // Function to show messages in the UI
+        function showMessage(msg) {
+            messageEl.textContent = msg;
+            messageEl.classList.remove('hidden');
+            setTimeout(() => {
+                messageEl.classList.add('hidden');
+            }, 3000);
         }
+
+        // Function to create a new game
+        async function createNewGame() {
+            if (gameRef) {
+                showMessage('Anda sudah dalam permainan. Silakan mulai permainan baru atau gabung.');
+                return;
+            }
+            const gameId = crypto.randomUUID();
+            gameRef = doc(db, `/artifacts/${appId}/public/data/games/${gameId}`);
+            
+            // Set initial game state in Firestore
+            await setDoc(gameRef, {
+                board: Array(9).fill(null),
+                status: 'Menunggu pemain...',
+                turn: 'X',
+                players: {
+                    X: currentUser.uid,
+                    O: null
+                }
+            });
+
+            setupGameListener();
+            showMessage(`Permainan baru dibuat! ID: ${gameId}`);
+            gameIdInput.value = gameId;
+            statusEl.textContent = 'Menunggu pemain lain untuk bergabung...';
+            newGameBtn.disabled = true;
+            joinGameBtn.disabled = true;
+        }
+
+        // Function to join an existing game
+        async function joinGame() {
+            const gameId = gameIdInput.value.trim();
+            if (!gameId) {
+                showMessage('Masukkan ID permainan.');
+                return;
+            }
+            if (gameRef) {
+                showMessage('Anda sudah dalam permainan. Silakan mulai permainan baru atau gabung.');
+                return;
+            }
+
+            gameRef = doc(db, `/artifacts/${appId}/public/data/games/${gameId}`);
+            const gameDoc = await getDoc(gameRef);
+
+            if (!gameDoc.exists()) {
+                showMessage('ID permainan tidak valid.');
+                gameRef = null;
+                return;
+            }
+
+            const gameData = gameDoc.data();
+            if (gameData.players.O !== null) {
+                showMessage('Permainan sudah penuh.');
+                gameRef = null;
+                return;
+            }
+            if (gameData.players.X === currentUser.uid) {
+                showMessage('Anda tidak bisa bergabung dengan permainan Anda sendiri.');
+                gameRef = null;
+                return;
+            }
+            
+            // Update the game document to add the second player
+            await updateDoc(gameRef, {
+                'players.O': currentUser.uid,
+                status: 'Permainan dimulai!'
+            });
+
+            setupGameListener();
+            showMessage(`Berhasil bergabung dengan permainan ${gameId}!`);
+            newGameBtn.disabled = true;
+            joinGameBtn.disabled = true;
+        }
+
+        // Function to set up the real-time listener for the game state
+        function setupGameListener() {
+            if (unsubscribe) {
+                unsubscribe();
+            }
+            unsubscribe = onSnapshot(gameRef, (doc) => {
+                const gameData = doc.data();
+                if (!gameData) return;
+
+                // Update the board and status based on the new data
+                updateBoard(gameData.board);
+                statusEl.textContent = `Giliran: ${gameData.turn}`;
+                
+                // Check for a winner or draw
+                const winner = checkWinner(gameData.board);
+                if (winner) {
+                    statusEl.textContent = `Pemenang: ${winner}! Klik kotak untuk memulai permainan baru.`;
+                    gameRef = null; // End the game
+                    newGameBtn.disabled = false;
+                    joinGameBtn.disabled = false;
+                    return;
+                }
+
+                if (checkDraw(gameData.board)) {
+                    statusEl.textContent = `Permainan seri! Klik kotak untuk memulai permainan baru.`;
+                    gameRef = null; // End the game
+                    newGameBtn.disabled = false;
+                    joinGameBtn.disabled = false;
+                    return;
+                }
+
+                // If the game is full, check for current player's turn
+                const currentPlayerRole = gameData.players.X === currentUser.uid ? 'X' : (gameData.players.O === currentUser.uid ? 'O' : null);
+                if (gameData.players.X && gameData.players.O && currentPlayerRole === gameData.turn) {
+                    statusEl.textContent = `Giliran Anda (${gameData.turn})`;
+                } else if (gameData.players.X && gameData.players.O) {
+                    statusEl.textContent = `Giliran lawan (${gameData.turn})`;
+                }
+            });
+        }
+
+        // Function to handle a cell click
+        async function handleCellClick(index) {
+            if (!gameRef) {
+                // If game ended, start a new one automatically
+                createNewGame();
+                return;
+            }
+            
+            const gameDoc = await getDoc(gameRef);
+            const gameData = gameDoc.data();
+            const board = [...gameData.board];
+            const currentPlayerRole = gameData.players.X === currentUser.uid ? 'X' : 'O';
+
+            // Check if it's the current player's turn and the cell is empty
+            if (gameData.turn === currentPlayerRole && board[index] === null) {
+                board[index] = currentPlayerRole;
+                const nextTurn = currentPlayerRole === 'X' ? 'O' : 'X';
+
+                await updateDoc(gameRef, {
+                    board: board,
+                    turn: nextTurn
+                });
+            } else if (board[index] !== null) {
+                 showMessage('Kotak sudah terisi. Pilih kotak lain.');
+            } else {
+                showMessage('Ini bukan giliran Anda!');
+            }
+        }
+
+        // Function to update the UI board
+        function updateBoard(board) {
+            boardEl.innerHTML = '';
+            board.forEach((cell, index) => {
+                const cellEl = document.createElement('div');
+                cellEl.classList.add('cell', 'p-4', 'border-2', 'border-gray-500', 'flex', 'items-center', 'justify-center', 'font-bold', 'text-4xl', 'md:text-6xl', 'cursor-pointer', 'rounded-lg', 'transition-colors', 'duration-200');
+                if (cell === 'X') {
+                    cellEl.classList.add('text-blue-500');
+                } else if (cell === 'O') {
+                    cellEl.classList.add('text-red-500');
+                }
+                cellEl.textContent = cell;
+                cellEl.addEventListener('click', () => handleCellClick(index));
+                boardEl.appendChild(cellEl);
+            });
+        }
+
+        // Function to check for a winner
+        function checkWinner(board) {
+            const winConditions = [
+                [0, 1, 2], [3, 4, 5], [6, 7, 8], // Rows
+                [0, 3, 6], [1, 4, 7], [2, 5, 8], // Columns
+                [0, 4, 8], [2, 4, 6]            // Diagonals
+            ];
+            for (const condition of winConditions) {
+                const [a, b, c] = condition;
+                if (board[a] && board[a] === board[b] && board[a] === board[c]) {
+                    return board[a];
+                }
+            }
+            return null;
+        }
+
+        // Function to check for a draw
+        function checkDraw(board) {
+            return !checkWinner(board) && board.every(cell => cell !== null);
+        }
+
+        // Main entry point for the application, handles Firebase auth
+        window.onload = async function() {
+            // Sign in to Firebase
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Firebase Auth Error:", error);
+            }
+
+            // Listen for auth state changes
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    currentUser = user;
+                    yourIdEl.textContent = `ID Anda: ${currentUser.uid}`;
+                    newGameBtn.disabled = false;
+                    joinGameBtn.disabled = false;
+                } else {
+                    // Handle user signed out
+                    currentUser = null;
+                    yourIdEl.textContent = 'ID Anda: Tidak terhubung';
+                    newGameBtn.disabled = true;
+                    joinGameBtn.disabled = true;
+                }
+            });
+
+            // Set up button event listeners
+            newGameBtn.addEventListener('click', createNewGame);
+            joinGameBtn.addEventListener('click', joinGame);
+
+            // Initialize the board
+            updateBoard(Array(9).fill(null));
+        };
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .container {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background-color: #1a202c; /* Tailwind's gray-900 */
+            color: #e2e8f0; /* Tailwind's gray-200 */
+        }
+        .board-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            width: 100%;
+            max-width: 400px;
+            aspect-ratio: 1 / 1;
+        }
+        .cell {
+            background-color: #2d3748; /* Tailwind's gray-800 */
+        }
+        .cell:hover {
+            background-color: #4a5568; /* Tailwind's gray-700 */
+        }
+        .btn {
+            @apply p-3 rounded-lg font-bold transition-transform duration-200 hover:scale-105;
+        }
+    </style>
+</head>
+<body>
+    <div class="container p-4">
+        <h1 class="text-4xl font-extrabold mb-4 text-center">Tic-Tac-Toe Multiplayer</h1>
+        <p id="yourId" class="text-sm text-gray-400 mb-6 text-center"></p>
+
+        <div class="w-full max-w-sm mb-4">
+            <input type="text" id="gameIdInput" placeholder="Masukkan ID Permainan" class="w-full p-3 rounded-lg bg-gray-700 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+
+        <div class="flex flex-col md:flex-row gap-4 mb-8 w-full max-w-sm">
+            <button id="newGameBtn" class="btn bg-blue-600 hover:bg-blue-700 text-white w-full" disabled>
+                Mulai Permainan Baru
+            </button>
+            <button id="joinGameBtn" class="btn bg-green-600 hover:bg-green-700 text-white w-full" disabled>
+                Gabung Permainan
+            </button>
+        </div>
+
+        <div class="board-grid mb-6">
+            <!-- Game cells will be dynamically added here -->
+        </div>
+
+        <h2 id="status" class="text-2xl font-semibold text-center mb-4">Mulai permainan!</h2>
+
+        <!-- Message box -->
+        <div id="message" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 bg-yellow-400 text-black px-6 py-3 rounded-full shadow-lg transition-opacity duration-300 opacity-0 z-50">
+            Pesan
+        </div>
+
+    </div>
+</body>
+</html>
+
 
         onAuthStateChanged(auth, async (user) => {
             if (user) {
