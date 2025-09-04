@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tic-Tac-Toe Multiplayer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" rel="stylesheet">
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, addDoc, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        setLogLevel('debug');
+
+        const appId = typeof window.__app_id !== 'undefined' ? window.__app_id : 'default-app-id';
+        const firebaseConfig = typeof window.__firebase_config !== 'undefined' ? JSON.parse(window.__firebase_config) : {};
+        const initialAuthToken = typeof window.__initial_auth_token !== 'undefined' ? window.__initial_auth_token : null;
+        
+        let db, auth;
+        let userId;
+
+        const app = initializeApp(firebaseConfig);
+        db = getFirestore(app);
+        auth = getAuth(app);
+
+        if (initialAuthToken) {
+             signInWithCustomToken(auth, initialAuthToken).catch((error) => {
+                 console.error("Error signing in with custom token:", error);
+             });
+        } else {
+             signInAnonymously(auth).catch((error) => {
+                 console.error("Error signing in anonymously:", error);
+             });
+        }
+
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                userId = user.uid;
+                document.getElementById('user-id').textContent = userId;
+                document.getElementById('loading-screen').classList.add('hidden');
+                document.getElementById('main-screen').classList.remove('hidden');
+            } else {
+                console.log("User is signed out");
+            }
+        });
+
+        const gameLobby = document.getElementById('game-lobby');
+        const gameContainer = document.getElementById('game-container');
+        const createGameBtn = document.getElementById('create-game-btn');
+        const joinGameBtn = document.getElementById('join-game-btn');
+        const gameIdInput = document.getElementById('game-id-input');
+        const gameIdDisplay = document.getElementById('game-id-display');
+        const copyGameIdBtn = document.getElementById('copy-game-id-btn');
+        const playerStatus = document.getElementById('player-status');
+        const gameStatus = document.getElementById('game-status');
+        const cells = document.querySelectorAll('.cell');
+        const restartBtn = document.getElementById('restart-btn');
+        const messageInput = document.getElementById('message-input');
+        const sendMessageBtn = document.getElementById('send-message-btn');
+        const chatBox = document.getElementById('chat-box');
+        const opponentStatus = document.getElementById('opponent-status');
+        const alertBox = document.getElementById('alert-box');
+        const alertMessage = document.getElementById('alert-message');
+        const closeAlertBtn = document.getElementById('close-alert');
+
+        let gameRef;
+        let unsubscribe;
+        let myTurn = false;
+        let myPlayer = '';
+        let isGameActive = false;
+
+        const winningConditions = [
+            [0, 1, 2], [3, 4, 5], [6, 7, 8],
+            [0, 3, 6], [1, 4, 7], [2, 5, 8],
+            [0, 4, 8], [2, 4, 6]
+        ];
+        
+        const showCustomAlert = (message) => {
+            alertMessage.textContent = message;
+            alertBox.classList.remove('hidden');
+        };
+
+        const hideCustomAlert = () => {
+            alertBox.classList.add('hidden');
+        };
+
+        closeAlertBtn.addEventListener('click', hideCustomAlert);
+
+        createGameBtn.addEventListener('click', async () => {
+            const gameId = crypto.randomUUID();
+            gameRef = doc(db, `artifacts/${appId}/public/data/games/${gameId}`);
+            
+            await setDoc(gameRef, {
+                board: Array(9).fill(''),
+                turn: 'X',
+                playerX: userId,
+                playerO: null,
+                status: 'waiting',
+                chat: []
+            });
+            
+            myPlayer = 'X';
+            myTurn = true;
+            setupGame(gameId);
+        });
+
+        joinGameBtn.addEventListener('click', async () => {
+            const gameId = gameIdInput.value.trim();
+            if (!gameId) {
+                showCustomAlert("Silakan masukkan ID ruangan.");
+                return;
+            }
+
+            gameRef = doc(db, `artifacts/${appId}/public/data/games/${gameId}`);
+            const gameDoc = await getDoc(gameRef);
+
+            if (gameDoc.exists() && gameDoc.data().playerO === null) {
+                await updateDoc(gameRef, {
+                    playerO: userId,
+                    status: 'active'
+                });
+                myPlayer = 'O';
+                myTurn = false;
+                setupGame(gameId);
+            } else {
+                showCustomAlert("Ruangan tidak valid atau sudah penuh.");
+            }
+        });
+
+        const setupGame = (gameId) => {
+            gameLobby.classList.add('hidden');
+            gameContainer.classList.remove('hidden');
+            gameIdDisplay.textContent = gameId;
+            playerStatus.textContent = `Anda adalah Pemain ${myPlayer}`;
+            
+            unsubscribe = onSnapshot(gameRef, (doc) => {
+                const gameData = doc.data();
+                if (gameData) {
+                    updateBoard(gameData.board);
+                    updateGameStatus(gameData.status, gameData.turn, gameData.playerX, gameData.playerO);
+                    updateChat(gameData.chat);
+                }
+            });
+        };
+
+        const updateBoard = (board) => {
+            cells.forEach((cell, index) => {
+                const marker = board[index];
+                cell.textContent = marker;
+                cell.classList.remove('x-player', 'o-player');
+                if (marker === 'X') {
+                    cell.classList.add('x-player');
+                } else if (marker === 'O') {
+                    cell.classList.add('o-player');
+                }
+            });
+        };
+
+        const updateGameStatus = (status, turn, playerXId, playerOId) => {
+            const isMyTurn = (turn === myPlayer);
+            myTurn = isMyTurn;
+            isGameActive = status === 'active';
+            
+            if (status === 'waiting') {
+                gameStatus.textContent = 'Menunggu pemain lain...';
+                opponentStatus.textContent = 'Menunggu lawan...';
+            } else if (status === 'active') {
+                opponentStatus.textContent = 'Lawan ditemukan!';
+                gameStatus.textContent = myTurn ? 'Giliran Anda!' : `Giliran Pemain ${turn}`;
+            } else if (status === 'win') {
+                gameStatus.textContent = `Pemain ${turn} Menang!`;
+                isGameActive = false;
+            } else if (status === 'draw') {
+                gameStatus.textContent = 'Permainan Seri!';
+                isGameActive = false;
+            }
+        };
+
+        const updateChat = (messages) => {
+            chatBox.innerHTML = '';
+            messages.forEach(msg => {
+                const messageElement = document.createElement('div');
+                messageElement.classList.add('p-2', 'rounded-lg', 'break-words', 'mb-2');
+                messageElement.classList.add(msg.userId === userId ? 'bg-blue-200' : 'bg-gray-200');
+                messageElement.textContent = msg.message;
+                chatBox.appendChild(messageElement);
+            });
+            chatBox.scrollTop = chatBox.scrollHeight;
+        };
+
+        const handleCellClick = async (e) => {
+            if (!isGameActive || !myTurn) {
+                showCustomAlert('Bukan giliran Anda atau game belum dimulai.');
+                return;
+            }
+
+            const clickedCellIndex = parseInt(e.target.dataset.index);
+            const gameDoc = await getDoc(gameRef);
+            const board = gameDoc.data().board;
+
+            if (board[clickedCellIndex] === '') {
+                board[clickedCellIndex] = myPlayer;
+                await updateDoc(gameRef, { board: board });
+                checkResult(board);
+            } else {
+                showCustomAlert('Sel sudah terisi!');
+            }
+        };
+
+        const checkResult = async (board) => {
+            let winner = null;
+            for (let i = 0; i < winningConditions.length; i++) {
+                const [a, b, c] = winningConditions[i];
+                if (board[a] !== '' && board[a] === board[b] && board[a] === board[c]) {
+                    winner = board[a];
+                    break;
+                }
+            }
+
+            if (winner) {
+                await updateDoc(gameRef, { status: 'win', turn: winner });
+            } else if (board.every(cell => cell !== '')) {
+                await updateDoc(gameRef, { status: 'draw' });
+            } else {
+                const nextTurn = myPlayer === 'X' ? 'O' : 'X';
+                await updateDoc(gameRef, { turn: nextTurn });
+            }
+        };
+        
+        cells.forEach(cell => cell.addEventListener('click', handleCellClick));
+
+        restartBtn.addEventListener('click', async () => {
+            if (myPlayer === 'X') {
+                await updateDoc(gameRef, {
+                    board: Array(9).fill(''),
+                    turn: 'X',
+                    status: 'active'
+                });
+            } else {
+                showCustomAlert('Hanya Pemain X yang bisa memulai ulang game.');
+            }
+        });
+
+        sendMessageBtn.addEventListener('click', async () => {
+            const message = messageInput.value.trim();
+            if (message) {
+                const gameDoc = await getDoc(gameRef);
+                const chat = gameDoc.data().chat || [];
+                chat.push({
+                    userId: userId,
+                    message: message,
+                    timestamp: new Date()
+                });
+                await updateDoc(gameRef, { chat: chat });
+                messageInput.value = '';
+            }
+        });
+
+        copyGameIdBtn.addEventListener('click', () => {
+            navigator.clipboard.writeText(gameIdDisplay.textContent).then(() => {
+                showCustomAlert("ID Game disalin ke clipboard!");
+            }).catch(err => {
+                console.error('Gagal menyalin:', err);
+            });
+        });
+    </script>
+
+    <div id="loading-screen" class="fixed inset-0 bg-gray-900 bg-opacity-90 flex items-center justify-center flex-col z-50">
+        <div class="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-white"></div>
+        <p class="text-white mt-4 text-lg">Memuat...</p>
+    </div>
+
+    <div id="alert-box" class="fixed top-8 left-1/2 -translate-x-1/2 bg-yellow-500 text-white p-4 rounded-lg shadow-xl hidden z-50">
+        <p id="alert-message"></p>
+        <button id="close-alert" class="absolute top-1 right-2 text-white font-bold">&times;</button>
+    </div>
+
+    <div id="main-screen" class="container flex flex-col items-center hidden">
+        <h1 class="text-4xl sm:text-5xl font-extrabold mb-4 text-center">Tic-Tac-Toe Multiplayer</h1>
+        <p class="text-center text-sm text-gray-500">
+            ID Anda: <span id="user-id" class="font-mono text-gray-700 font-bold"></span>
+        </p>
+
+        <div id="game-lobby" class="mt-8 space-y-4 w-full">
+            <h2 class="text-2xl font-bold text-center">Bergabung atau Buat Game</h2>
+            <div class="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-2">
+                <input id="game-id-input" type="text" placeholder="Masukkan ID Game" class="flex-1 p-3 rounded-xl border border-gray-300 focus:ring-2 focus:ring-blue-500 outline-none">
+                <button id="join-game-btn" class="bg-blue-500 text-white py-3 px-6 rounded-full font-bold shadow-lg hover:bg-blue-600 transition-colors">Bergabung</button>
+            </div>
+            <div class="text-center text-gray-500">atau</div>
+            <button id="create-game-btn" class="w-full bg-green-500 text-white py-3 px-6 rounded-full font-bold shadow-lg hover:bg-green-600 transition-colors">Buat Game Baru</button>
+        </div>
+
+        <div id="game-container" class="w-full hidden">
+            <div class="flex flex-col items-center mb-4">
+                <div class="flex items-center space-x-2 mb-2">
+                    <span class="text-lg font-semibold">ID Game:</span>
+                    <span id="game-id-display" class="font-mono text-lg text-gray-700 font-bold"></span>
+                    <button id="copy-game-id-btn" class="p-2 rounded-full text-gray-500 hover:bg-gray-200 transition-colors">
+                        <i class="fas fa-copy"></i>
+                    </button>
+                </div>
+                <p id="player-status" class="text-md text-gray-600 mb-2"></p>
+                <p id="opponent-status" class="text-md text-gray-600"></p>
+            </div>
+            
+            <div id="game-status" class="game-status"></div>
+            
+            <div class="grid relative mb-8">
+                <div class="cell" data-index="0"></div>
+                <div class="cell" data-index="1"></div>
+                <div class="cell" data-index="2"></div>
+                <div class="cell" data-index="3"></div>
+                <div class="cell" data-index="4"></div>
+                <div class="cell" data-index="5"></div>
+                <div class="cell" data-index="6"></div>
+                <div class="cell" data-index="7"></div>
+                <div class="cell" data-index="8"></div>
+            </div>
+    
+            <div class="flex justify-center">
+                <button id="restart-btn" class="bg-red-500 text-white py-3 px-8 rounded-full font-bold shadow-lg hover:bg-red-600 transition-colors">Mulai Ulang</button>
+            </div>
+
+            <div class="mt-8 p-4 bg-gray-100 rounded-lg">
+                <h3 class="text-lg font-bold mb-2">Obrolan</h3>
+                <div id="chat-box" class="h-40 overflow-y-auto bg-white p-3 rounded-lg border border-gray-300 mb-2"></div>
+                <div class="flex">
+                    <input type="text" id="message-input" placeholder="Ketik pesan..." class="flex-1 p-2 rounded-l-lg border border-gray-300 focus:outline-none">
+                    <button id="send-message-btn" class="bg-gray-500 text-white px-4 rounded-r-lg hover:bg-gray-600 transition-colors">Kirim</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
